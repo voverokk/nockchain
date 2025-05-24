@@ -18,10 +18,7 @@ sudo apt update
 sudo apt install clang llvm-dev libclang-dev
 ```
 
-Copy the example environment file and rename it to `.env`:
-```
-cp .env_example .env
-```
+
 
 Install `hoonc`, the Hoon compiler:
 
@@ -67,7 +64,7 @@ nockchain-wallet keygen
 
 This will print a new public/private key pair + chain code to the console, as well as the seed phrase for the private key.
 
-Now, copy the public key to the `.env` file:
+Now, copy the your public key to the `.env` file:
 
 ```
 MINING_PUBKEY=<public-key>
