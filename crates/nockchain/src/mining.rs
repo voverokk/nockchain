@@ -18,6 +18,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Semaphore;
 use num_cpus;
 
+// Add Clone trait implementation for NockAppHandle
+impl Clone for NockAppHandle {
+    fn clone(&self) -> Self {
+        self.dup().1
+    }
+}
+
 pub enum MiningWire {
     Mined,
     Candidate,
@@ -100,7 +107,7 @@ pub fn create_mining_driver(
     init_complete_tx: Option<tokio::sync::oneshot::Sender<()>>,
     thread_config: MiningThreadConfig,
 ) -> IODriverFn {
-    Box::new(move |mut handle| {
+    Box::new(move |handle| {
         Box::pin(async move {
             let Some(configs) = mining_config else {
                 enable_mining(&handle, false).await?;
@@ -175,7 +182,7 @@ pub fn create_mining_driver(
                           warn!("Error receiving effect in mining driver: {effect_res:?}");
                         continue;
                         };
-                        let Ok(effect_cell) = (unsafe { effect.root().as_cell() }) else {
+                        let Ok(effect_cell) = unsafe { effect.root().as_cell() } else {
                             drop(effect);
                             continue;
                         };
@@ -189,7 +196,7 @@ pub fn create_mining_driver(
                             
                             // Add to queue or process immediately if possible
                             if let Ok(permit) = semaphore.clone().try_acquire() {
-                                spawn_mining_task(&thread_pool, candidate_slab, handle, semaphore.clone(), mining_state.clone(), permit).await;
+                                spawn_mining_task(thread_pool, candidate_slab, handle.clone(), semaphore.clone(), mining_state.clone(), permit).await;
                             } else {
                                 candidate_queue.push(candidate_slab);
                             }
@@ -201,7 +208,7 @@ pub fn create_mining_driver(
                         while let Some(candidate) = candidate_queue.pop() {
                             match semaphore.clone().try_acquire() {
                                 Ok(permit) => {
-                                    spawn_mining_task(&thread_pool, candidate, handle, semaphore.clone(), mining_state.clone(), permit).await;
+                                    spawn_mining_task(thread_pool, candidate, handle.clone(), semaphore.clone(), mining_state.clone(), permit).await;
                                 },
                                 Err(_) => {
                                     // Put it back and try again later
@@ -218,10 +225,10 @@ pub fn create_mining_driver(
 }
 
 async fn spawn_mining_task(
-    thread_pool: &ThreadPool,
+    thread_pool: ThreadPool,
     candidate: NounSlab,
     handle: NockAppHandle,
-    semaphore: Arc<Semaphore>,
+    _semaphore: Arc<Semaphore>,
     mining_state: Arc<AtomicBool>,
     _permit: tokio::sync::SemaphorePermit<'_>,
 ) {
@@ -287,7 +294,7 @@ async fn spawn_mining_task(
                     // Process effects and extract any successful mining results
                     let mut mining_result = None;
                     for effect in effects_slab.to_vec() {
-                        let Ok(effect_cell) = (unsafe { effect.root().as_cell() }) else {
+                        let Ok(effect_cell) = unsafe { effect.root().as_cell() } else {
                             drop(effect);
                             continue;
                         };
@@ -295,7 +302,7 @@ async fn spawn_mining_task(
                         if effect_cell.head().eq_bytes("command") {
                             // Create a new slab to hold just this effect
                             let mut result_slab = NounSlab::new();
-                            result_slab.copy_into(*effect.root());
+                            result_slab.copy_into(unsafe { *effect.root() });
                             mining_result = Some(result_slab);
                             break;
                         }
@@ -316,8 +323,8 @@ async fn spawn_mining_task(
         }).await;
         
         // Process the mining result if successful
-        if let Ok(Some(effect)) = result {
-            if let Err(e) = handle.poke(MiningWire::Mined.to_wire(), effect).await {
+        if let Ok(Some(ref effect)) = result {
+            if let Err(e) = handle.poke(MiningWire::Mined.to_wire(), effect.clone()).await {
                 warn!("Could not poke nockchain with mined PoW: {:?}", e);
             }
         }
@@ -347,7 +354,7 @@ pub async fn mining_attempt(candidate: NounSlab, handle: NockAppHandle) -> () {
         .await
         .expect("Could not poke mining kernel with candidate");
     for effect in effects_slab.to_vec() {
-        let Ok(effect_cell) = (unsafe { effect.root().as_cell() }) else {
+        let Ok(effect_cell) = unsafe { effect.root().as_cell() } else {
             drop(effect);
             continue;
         };
