@@ -39,6 +39,9 @@ tracing-test.workspace = true
 
 zkvm-jetpack.workspace = true
 
+rayon = "1.8"
+num_cpus = "1.16"
+
 [build-dependencies]
 vergen = { workspace = true, features = [
     "build",
