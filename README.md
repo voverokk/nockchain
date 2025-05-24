@@ -1,4 +1,4 @@
-# Nockchain
+# Nockchain optimize 1.0
 
 **Nockchain is a lightweight blockchain for heavyweight verifiable applications.**
 
