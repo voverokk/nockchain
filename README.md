@@ -108,6 +108,43 @@ sh ./scripts/run_nockchain_miner.sh
 For launch, make sure you run in a fresh working directory that does not include a .data.nockchain file from testing.
 
 
+## Multi-threaded Mining
+
+The mining functionality now supports utilizing multiple CPU threads to maximize mining performance. By default, the miner will automatically detect and use all available CPU cores on your system.
+
+### Mining Configuration Options
+
+- `--mine`: Enable mining (default: false)
+- `--mining-pubkey <KEY>`: Public key to mine to
+- `--mining-threads <NUM>`: Number of threads to use for mining (0 = auto-detect, default: 0)
+- `--mining-memory-per-thread <MB>`: Maximum memory usage per mining thread in MB (default: 1024)
+
+### Examples
+
+To mine with all available CPU cores:
+```
+./nockchain --mine --mining-pubkey <your-pubkey>
+```
+
+To mine with a specific number of threads:
+```
+./nockchain --mine --mining-pubkey <your-pubkey> --mining-threads 16
+```
+
+To mine with custom memory settings:
+```
+./nockchain --mine --mining-pubkey <your-pubkey> --mining-threads 32 --mining-memory-per-thread 512
+```
+
+### Memory Management
+
+The mining process automatically manages memory usage based on the number of threads and memory per thread settings. For optimal performance on systems with many cores:
+
+1. Set `--mining-threads` to the number of physical CPU cores you want to use
+2. Adjust `--mining-memory-per-thread` based on your available RAM:
+   - Total RAM used = mining-threads × mining-memory-per-thread
+   - Example: 32 threads with 512MB per thread = ~16GB RAM usage
+
 ## FAQ
 
 ### Can I use same pubkey if running multiple miners?

@@ -191,6 +191,18 @@ pub struct NockchainCli {
         value_delimiter = ',',
     )]
     pub mining_key_adv: Option<Vec<MiningKeyConfig>>,
+    #[arg(
+        long,
+        help = "Number of threads to use for mining (0 = auto-detect)",
+        default_value = "0"
+    )]
+    pub mining_threads: usize,
+    #[arg(
+        long,
+        help = "Maximum memory usage per mining thread in MB",
+        default_value = "1024"
+    )]
+    pub mining_memory_per_thread: usize,
     #[arg(long, help = "Watch for genesis block", default_value = "false")]
     pub genesis_watcher: bool,
     #[arg(long, help = "Mine genesis block", default_value = "false")]
@@ -570,9 +582,17 @@ pub async fn init_with_kernel(
     });
 
     let mine = cli.as_ref().map_or(false, |c| c.mine);
+    
+    // Create mining thread configuration
+    let mining_thread_config = cli.as_ref().map(|c| {
+        mining::MiningThreadConfig {
+            num_threads: c.mining_threads,
+            memory_per_thread: c.mining_memory_per_thread,
+        }
+    }).unwrap_or_default();
 
     let mining_driver =
-        crate::mining::create_mining_driver(mining_config, mine, Some(mining_init_tx));
+        crate::mining::create_mining_driver(mining_config, mine, Some(mining_init_tx), mining_thread_config);
     nockapp.add_io_driver(mining_driver).await;
 
     let libp2p_driver = nockchain_libp2p_io::nc::make_libp2p_driver(

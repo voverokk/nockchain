@@ -1,4 +1,5 @@
 use std::str::FromStr;
+use std::sync::Arc;
 
 use kernels::miner::KERNEL;
 use nockapp::kernel::checkpoint::JamPaths;
@@ -11,7 +12,11 @@ use nockapp::noun::{AtomExt, NounExt};
 use nockvm::noun::{Atom, D, T};
 use nockvm_macros::tas;
 use tempfile::tempdir;
-use tracing::{instrument, warn};
+use tracing::{debug, instrument, warn};
+use rayon::{ThreadPool, ThreadPoolBuilder};
+use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::sync::Semaphore;
+use num_cpus;
 
 pub enum MiningWire {
     Mined,
@@ -71,10 +76,29 @@ impl FromStr for MiningKeyConfig {
     }
 }
 
+/// Configuration for the mining thread pool
+#[derive(Debug, Clone)]
+pub struct MiningThreadConfig {
+    /// Number of threads to use for mining (0 = auto-detect)
+    pub num_threads: usize,
+    /// Maximum memory usage per thread in MB
+    pub memory_per_thread: usize,
+}
+
+impl Default for MiningThreadConfig {
+    fn default() -> Self {
+        Self {
+            num_threads: 0, // Auto-detect
+            memory_per_thread: 1024, // 1GB per thread by default
+        }
+    }
+}
+
 pub fn create_mining_driver(
     mining_config: Option<Vec<MiningKeyConfig>>,
     mine: bool,
     init_complete_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    thread_config: MiningThreadConfig,
 ) -> IODriverFn {
     Box::new(move |mut handle| {
         Box::pin(async move {
@@ -111,8 +135,38 @@ pub fn create_mining_driver(
             if !mine {
                 return Ok(());
             }
-            let mut next_attempt: Option<NounSlab> = None;
-            let mut current_attempt: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+
+            // Determine number of threads to use
+            let num_threads = if thread_config.num_threads == 0 {
+                num_cpus::get()
+            } else {
+                thread_config.num_threads
+            };
+
+            debug!("Starting mining with {} threads", num_threads);
+            
+            // Create a thread pool for mining operations
+            let thread_pool = ThreadPoolBuilder::new()
+                .num_threads(num_threads)
+                .build()
+                .expect("Failed to create mining thread pool");
+                
+            // Create a semaphore to limit memory usage
+            // Calculate max concurrent tasks based on memory constraints
+            let system_memory = num_cpus::get() * 4096; // Rough estimate in MB
+            let max_memory_usage = thread_config.memory_per_thread * num_threads;
+            let memory_limit = std::cmp::min(system_memory, max_memory_usage);
+            let max_concurrent_tasks = std::cmp::max(1, memory_limit / thread_config.memory_per_thread);
+            
+            debug!("Memory per thread: {}MB, Max concurrent tasks: {}", thread_config.memory_per_thread, max_concurrent_tasks);
+            
+            let semaphore = Arc::new(Semaphore::new(max_concurrent_tasks));
+            
+            // Shared state for mining attempts
+            let mining_state = Arc::new(AtomicBool::new(true));
+            
+            // Queue for pending mining candidates
+            let mut candidate_queue: Vec<NounSlab> = Vec::new();
 
             loop {
                 tokio::select! {
@@ -132,32 +186,148 @@ pub fn create_mining_driver(
                                 slab.copy_into(effect_cell.tail());
                                 slab
                             };
-                            if !current_attempt.is_empty() {
-                                next_attempt = Some(candidate_slab);
+                            
+                            // Add to queue or process immediately if possible
+                            if let Ok(permit) = semaphore.clone().try_acquire() {
+                                spawn_mining_task(&thread_pool, candidate_slab, handle.dup().1, semaphore.clone(), mining_state.clone(), permit).await;
                             } else {
-                                let (cur_handle, attempt_handle) = handle.dup();
-                                handle = cur_handle;
-                                current_attempt.spawn(mining_attempt(candidate_slab, attempt_handle));
+                                candidate_queue.push(candidate_slab);
                             }
                         }
                     },
-                    mining_attempt_res = current_attempt.join_next(), if !current_attempt.is_empty()  => {
-                        if let Some(Err(e)) = mining_attempt_res {
-                            warn!("Error during mining attempt: {e:?}");
+                    
+                    // Check if permits are available to process queued candidates
+                    _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)), if !candidate_queue.is_empty() => {
+                        while let Some(candidate) = candidate_queue.pop() {
+                            match semaphore.clone().try_acquire() {
+                                Ok(permit) => {
+                                    spawn_mining_task(&thread_pool, candidate, handle.dup().1, semaphore.clone(), mining_state.clone(), permit).await;
+                                },
+                                Err(_) => {
+                                    // Put it back and try again later
+                                    candidate_queue.push(candidate);
+                                    break;
+                                }
+                            }
                         }
-                        let Some(candidate_slab) = next_attempt else {
-                            continue;
-                        };
-                        next_attempt = None;
-                        let (cur_handle, attempt_handle) = handle.dup();
-                        handle = cur_handle;
-                        current_attempt.spawn(mining_attempt(candidate_slab, attempt_handle));
-
                     }
                 }
             }
         })
     })
+}
+
+async fn spawn_mining_task(
+    thread_pool: &ThreadPool,
+    candidate: NounSlab,
+    handle: NockAppHandle,
+    semaphore: Arc<Semaphore>,
+    mining_state: Arc<AtomicBool>,
+    _permit: tokio::sync::SemaphorePermit,
+) {
+    let handle_clone = handle.clone();
+    let mining_state_clone = mining_state.clone();
+    
+    tokio::task::spawn(async move {
+        // This closure will be executed in the thread pool
+        let result = tokio::task::spawn_blocking(move || {
+            let mining_active = mining_state_clone.load(Ordering::Relaxed);
+            if !mining_active {
+                return None;
+            }
+            
+            // Create a temporary directory for this mining attempt
+            let snapshot_dir = match tempdir() {
+                Ok(dir) => dir,
+                Err(e) => {
+                    warn!("Failed to create temporary directory for mining: {}", e);
+                    return None;
+                }
+            };
+            
+            // Generate the hot state
+            let hot_state = zkvm_jetpack::hot::produce_prover_hot_state();
+            
+            // Set up paths
+            let snapshot_path_buf = snapshot_dir.path().to_path_buf();
+            let jam_paths = JamPaths::new(snapshot_dir.path());
+            
+            // Execute the mining task in the thread pool
+            thread_pool.install(|| {
+                // This runs in the rayon thread pool
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("Failed to build tokio runtime for mining");
+                
+                // Use a scope to ensure resources are released promptly
+                let result = rt.block_on(async {
+                    // Load kernel and attempt mining
+                    let kernel = match Kernel::load_with_hot_state_huge(
+                        snapshot_path_buf, 
+                        jam_paths, 
+                        KERNEL, 
+                        &hot_state, 
+                        false
+                    ).await {
+                        Ok(k) => k,
+                        Err(e) => {
+                            warn!("Could not load mining kernel: {:?}", e);
+                            return None;
+                        }
+                    };
+                    
+                    let effects_slab = match kernel.poke(MiningWire::Candidate.to_wire(), candidate).await {
+                        Ok(slab) => slab,
+                        Err(e) => {
+                            warn!("Could not poke mining kernel with candidate: {:?}", e);
+                            return None;
+                        }
+                    };
+                    
+                    // Process effects and extract any successful mining results
+                    let mut mining_result = None;
+                    for effect in effects_slab.to_vec() {
+                        let Ok(effect_cell) = (unsafe { effect.root().as_cell() }) else {
+                            drop(effect);
+                            continue;
+                        };
+                        
+                        if effect_cell.head().eq_bytes("command") {
+                            // Create a new slab to hold just this effect
+                            let mut result_slab = NounSlab::new();
+                            result_slab.copy_into(effect.root());
+                            mining_result = Some(result_slab);
+                            break;
+                        }
+                    }
+                    
+                    // Explicitly drop resources to free memory
+                    drop(effects_slab);
+                    drop(kernel);
+                    
+                    mining_result
+                });
+                
+                // Explicitly drop the runtime to free resources
+                drop(rt);
+                
+                result
+            })
+        }).await;
+        
+        // Process the mining result if successful
+        if let Ok(Some(effect)) = result {
+            if let Err(e) = handle_clone.poke(MiningWire::Mined.to_wire(), effect).await {
+                warn!("Could not poke nockchain with mined PoW: {:?}", e);
+            }
+        }
+        
+        // Explicitly drop the result to free memory
+        drop(result);
+        
+        // The permit is automatically released when it goes out of scope
+    });
 }
 
 pub async fn mining_attempt(candidate: NounSlab, handle: NockAppHandle) -> () {
