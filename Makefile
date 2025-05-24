@@ -5,7 +5,7 @@ include .env
 export RUST_BACKTRACE ?= full
 export RUST_LOG ?= info,nockchain=info,nockchain_libp2p_io=info,libp2p=info,libp2p_quic=info
 export MINIMAL_LOG_FORMAT ?= true
-export MINING_PUBKEY ?= 2qwq9dQRZfpFx8BDicghpMRnYGKZsZGxxhh9m362pzpM9aeo276pR1yHZPS41y3CW3vPKxeYM8p8fzZS8GXmDGzmNNCnVNekjrSYogqfEFMqwhHh5iCjaKPaDTwhupWqiXj6
+export MINING_PUBKEY ?= 3FGzWKxUSh3gMHEnqaJWfyJ9oKLxf5ALHmVGPxP9eocnfqezCmLkAFPZvC2KoLcRbGCUowRCCieNqMhd62tTtPYPBSJTmwuAdSfWS6B4YearFA7VzjZmrH7wQSpafRHoZWgs
 export
 
 .PHONY: build
