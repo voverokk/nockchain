@@ -146,10 +146,10 @@ pub fn create_mining_driver(
             debug!("Starting mining with {} threads", num_threads);
             
             // Create a thread pool for mining operations
-            let thread_pool = ThreadPoolBuilder::new()
+            let thread_pool = Arc::new(ThreadPoolBuilder::new()
                 .num_threads(num_threads)
                 .build()
-                .expect("Failed to create mining thread pool");
+                .expect("Failed to create mining thread pool"));
                 
             // Create a semaphore to limit memory usage
             // Calculate max concurrent tasks based on memory constraints
@@ -220,7 +220,7 @@ pub fn create_mining_driver(
 }
 
 async fn spawn_mining_task(
-    thread_pool: ThreadPool,
+    thread_pool: Arc<ThreadPool>,
     candidate: NounSlab,
     handle: NockAppHandle,
     _semaphore: Arc<Semaphore>,
